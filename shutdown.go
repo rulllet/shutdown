@@ -33,7 +33,7 @@ type handlerWithPriority struct {
 	priority int
 }
 
-// HandlerInfo содержит полную информацию о выполнении обработчика
+// HandlerInfo contains complete information about the execution of the handler
 type HandlerInfo struct {
 	FunctionName string        // Function name (automatically extracted)
 	Priority     int           // Handler priority
