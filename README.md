@@ -18,7 +18,7 @@ The `shutdown` package provides a mechanism for graceful shutdown of Go applicat
 ## Installation
 
 ```bash
-go get github.com/yourusername/shutdown
+go get github.com/rulllet/shutdown
 ```
 
 ## Usage
