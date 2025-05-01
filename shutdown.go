@@ -94,7 +94,7 @@ func (c *Closer) RegisterWithPriority(h Handler, priority int) {
 //	    func(ctx context.Context) error { return db.Backup(ctx) },
 //	}
 //
-// closer.Batch(dbHandlers, shutdown.PriorityCritical)
+// 	closer.Batch(dbHandlers, shutdown.PriorityCritical)
 func (c *Closer) Batch(handlers []Handler, priority int) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
