@@ -35,12 +35,12 @@ type handlerWithPriority struct {
 
 // HandlerInfo содержит полную информацию о выполнении обработчика
 type HandlerInfo struct {
-	FunctionName string        // Имя функции (извлекается автоматически)
-	Priority     int           // Приоритет обработчика
-	Success      bool          // Успешность выполнения
-	Error        error         // Ошибка, если была
-	Panic        interface{}   // Паника, если была
-	Duration     time.Duration // Время выполнения
+	FunctionName string        // Function name (automatically extracted)
+	Priority     int           // Handler priority
+	Success      bool          // Successful execution
+	Error        error         // Error if there was one
+	Panic        interface{}   // Panic, if there was one
+	Duration     time.Duration // lead time
 }
 
 // Closer manages the graceful shutdown process
