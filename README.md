@@ -2,7 +2,7 @@
 
 ![Go Version](https://img.shields.io/badge/go-1.18+-blue.svg)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](https://opensource.org/licenses/MIT)
-[![Go Report Card](https://goreportcard.com/badge/github.com/yourusername/shutdown)](https://goreportcard.com/report/github.com/yourusername/shutdown)
+[![Go Report Card](https://goreportcard.com/badge/github.com/rulllet/shutdown)](https://goreportcard.com/report/github.com/rulllet/shutdown)
 
 The `shutdown` package provides a mechanism for graceful shutdown of Go applications with support for handler priorities, timeouts, and error handling.
 
