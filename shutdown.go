@@ -85,64 +85,23 @@ func (c *Closer) RegisterWithPriority(h Handler, priority int) {
 	})
 }
 
-// Batch registers a list of handlers with the specified priority
-//
-//	closer := shutdown.New(5*time.Second, 15*time.Second)
-//	dbHandlers := []shutdown.Handler{
-//	    func(ctx context.Context) error { return db.CloseConnections() },
-//	    func(ctx context.Context) error { return db.FlushBuffers() },
-//	    func(ctx context.Context) error { return db.Backup(ctx) },
-//	}
-//
-// 	closer.Batch(dbHandlers, shutdown.PriorityCritical)
-func (c *Closer) Batch(handlers []Handler, priority int) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-
-	if c.closed {
-		log.Println("Warning: Batch registration called after Close")
-		return
-	}
-
-	for _, h := range handlers {
-		c.handlers = append(c.handlers, handlerWithPriority{
-			handler:  h,
-			priority: priority,
-		})
-	}
-}
-
-// WithDefaults registers handlers with default parameters
-//
-//	closer := shutdown.New(5*time.Second, 15*time.Second)
-//	closer.WithDefaults(
-//
-//	metrics.Flush,
-//	notifications.SendShutdownAlert,
-//	debug.DumpState,
-//
-//	)
-func (c *Closer) WithDefaults(handlers ...Handler) {
-	c.Batch(handlers, PriorityNormal)
-}
-
-// Sequence registers lists of dependent handler chains:
+// GroupRegister registers lists of dependent handler chains:
 //
 //	closer := shutdown.New(5*time.Second, 15*time.Second)
 //
 //	The handlers will be executed in the order A -> B -> C
 //
-//	closer.Sequence([]shutdown.Handler{handlerA, handlerB, handlerC}, PriorityNormal)
-func (c *Closer) Sequence(handlers []Handler, priority int) {
+//	closer.GroupRegister([]shutdown.Handler{handlerA, handlerB, handlerC}, PriorityNormal)
+func (c *Closer) GroupRegister(handlers []Handler, priority int) {
 	for i := len(handlers) - 1; i >= 0; i-- {
 		c.RegisterWithPriority(handlers[i], priority)
 	}
 }
 
-// Close executes all handlers in priority order and returns an exit code.
+// Close executes all registered handlers in priority groups (highest first).
 // Returns:
-// - 0: if all handlers succeeded
-// - 1: if there were errors or timeouts
+// - 0 if all handlers completed successfully
+// - 1 if any handler failed, timed out, or panicked
 func (c *Closer) Close() int {
 	c.mu.Lock()
 	if c.closed {
@@ -152,10 +111,13 @@ func (c *Closer) Close() int {
 	c.closed = true
 	c.mu.Unlock()
 
+	// Early exit if no handlers registered
 	if len(c.handlers) == 0 {
-	    return 0
+		log.Println("No handlers registered")
+		return 0
 	}
-	// Sort handlers by priority (most important first)
+
+	// Sort handlers by priority (highest first)
 	sort.Slice(c.handlers, func(i, j int) bool {
 		return c.handlers[i].priority < c.handlers[j].priority
 	})
@@ -164,90 +126,71 @@ func (c *Closer) Close() int {
 	defer cancel()
 
 	var (
-		wg          sync.WaitGroup
 		hasErr      atomic.Bool
 		results     = make([]HandlerInfo, len(c.handlers))
 		resultsLock sync.Mutex
 	)
 
-	wg.Add(len(c.handlers))
+	// Process handlers in priority groups
+	currentPriority := c.handlers[0].priority
+	startIdx := 0
 
-	// Execute handlers in order of priority
-	for i, hp := range c.handlers {
-		go func(idx int, h Handler, priority int) {
-			defer wg.Done()
+	for i := 0; i <= len(c.handlers); i++ {
+		// Trigger group execution when either:
+		// 1. Priority changes
+		// 2. We reach the end of the list
+		if i == len(c.handlers) || c.handlers[i].priority != currentPriority {
+			groupSize := i - startIdx
+			if groupSize == 0 {
+				continue
+			}
 
-			startTime := time.Now()
-			hCtx, hCancel := context.WithTimeout(ctx, c.timeout)
-			defer hCancel()
+			log.Printf("Executing priority group %d (%d handlers)", currentPriority, groupSize)
 
-			var handlerErr error
-			var panicObj interface{}
-			success := true
+			var wg sync.WaitGroup
+			wg.Add(groupSize)
 
-			done := make(chan struct{})
-			go func() {
-				defer close(done)
-				defer func() {
-					if r := recover(); r != nil {
-						panicObj = r
-						success = false
-						log.Printf("PANIC in handler (priority %d): %v", hp.priority, r)
+			// Execute all handlers in current priority group
+			for j := startIdx; j < i; j++ {
+				go func(idx int, hp handlerWithPriority) {
+					defer wg.Done()
+					result := c.executeHandler(ctx, hp)
+
+					resultsLock.Lock()
+					results[idx] = result
+					resultsLock.Unlock()
+
+					if !result.Success {
 						hasErr.Store(true)
 					}
-				}()
-				if err := h(hCtx); err != nil {
-					handlerErr = err
-					success = false
-					log.Printf("Handler error (priority %d): %v", hp.priority, err)
-					hasErr.Store(true)
-				}
+				}(j, c.handlers[j])
+			}
+
+			// Wait for current group to complete
+			done := make(chan struct{})
+			go func() {
+				wg.Wait()
+				close(done)
 			}()
 
 			select {
 			case <-done:
-			case <-hCtx.Done():
-				if handlerErr == nil {
-					handlerErr = context.DeadlineExceeded
-				}
-				success = false
-				log.Printf("Handler timeout (priority %d) after %v", hp.priority, c.timeout)
+				log.Printf("Priority group %d completed", currentPriority)
+			case <-ctx.Done():
+				log.Printf("Global timeout reached while processing priority group %d", currentPriority)
 				hasErr.Store(true)
+				if c.onComplete != nil {
+					c.onComplete(results)
+				}
+				return 1
 			}
 
-			// We get the function name via reflection
-			funcName := runtime.FuncForPC(reflect.ValueOf(h).Pointer()).Name()
-
-			// Simplify the function name (remove the package path)
-			if shortName := getShortFuncName(funcName); shortName != "" {
-				funcName = shortName
+			// Move to next priority group
+			if i < len(c.handlers) {
+				currentPriority = c.handlers[i].priority
+				startIdx = i
 			}
-
-			resultsLock.Lock()
-			results[idx] = HandlerInfo{
-				FunctionName: funcName,
-				Priority:     priority,
-				Success:      success,
-				Error:        handlerErr,
-				Panic:        panicObj,
-				Duration:     time.Since(startTime),
-			}
-			resultsLock.Unlock()
-		}(i, hp.handler, hp.priority)
-	}
-
-	done := make(chan struct{})
-	go func() {
-		wg.Wait()
-		close(done)
-	}()
-
-	select {
-	case <-done:
-		log.Println("All handlers completed")
-	case <-ctx.Done():
-		log.Println("Global timeout reached, exiting forcefully")
-		hasErr.Store(true)
+		}
 	}
 
 	if c.onComplete != nil {
@@ -258,6 +201,56 @@ func (c *Closer) Close() int {
 		return 1
 	}
 	return 0
+}
+
+// executeHandler runs a single handler with proper timeout and panic handling
+func (c *Closer) executeHandler(ctx context.Context, hp handlerWithPriority) HandlerInfo {
+	startTime := time.Now()
+	hCtx, hCancel := context.WithTimeout(ctx, c.timeout)
+	defer hCancel()
+
+	var (
+		handlerErr error
+		panicObj   interface{}
+		success    bool
+	)
+
+	// Channel to track handler completion
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		defer func() {
+			if r := recover(); r != nil {
+				panicObj = r
+				log.Printf("PANIC in handler (priority %d): %v", hp.priority, r)
+			}
+		}()
+
+		if err := hp.handler(hCtx); err != nil {
+			handlerErr = err
+			log.Printf("Handler error (priority %d): %v", hp.priority, err)
+		}
+	}()
+
+	select {
+	case <-done:
+		success = panicObj == nil && handlerErr == nil
+	case <-hCtx.Done():
+		if handlerErr == nil {
+			handlerErr = context.DeadlineExceeded
+		}
+		log.Printf("Handler timeout (priority %d) after %v", hp.priority, c.timeout)
+	}
+	// We get the function name via reflection
+	funcName := runtime.FuncForPC(reflect.ValueOf(hp.handler).Pointer()).Name()
+	return HandlerInfo{
+		FunctionName: getShortFuncName(funcName),
+		Priority:     hp.priority,
+		Success:      success,
+		Error:        handlerErr,
+		Panic:        panicObj,
+		Duration:     time.Since(startTime),
+	}
 }
 
 // Wait waits for termination signals and starts the graceful shutdown process.
