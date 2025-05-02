@@ -152,6 +152,9 @@ func (c *Closer) Close() int {
 	c.closed = true
 	c.mu.Unlock()
 
+	if len(c.handlers) == 0 {
+	    return 0
+	}
 	// Sort handlers by priority (most important first)
 	sort.Slice(c.handlers, func(i, j int) bool {
 		return c.handlers[i].priority < c.handlers[j].priority
